@@ -9,10 +9,14 @@ using GameFinder.StoreHandlers.Origin;
 using GameFinder.StoreHandlers.Steam;
 using GameFinder.StoreHandlers.Steam.Models;
 using GameFinder.StoreHandlers.Steam.Models.ValueTypes;
+using GameFinder.StoreHandlers.Steam.Services;
 using Microsoft.Extensions.Logging;
 using Wabbajack.DTOs;
 using Wabbajack.Paths;
 using Wabbajack.Paths.IO;
+using System;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace Wabbajack.Downloaders.GameFile;
 
@@ -114,13 +118,52 @@ public class GameLocator : IGameLocator
     {
         if (handler is null) return;
 
-        var games = handler.FindAllGamesById(out var errors);
+        var originalGames = handler.FindAllGamesById(out var errors);
+        var games = new Dictionary<TId, TGame>(originalGames);
+        var fileSystem = NexusMods.Paths.FileSystem.Shared;
+
+        var nexusPath = fileSystem.FromUnsanitizedFullPath(@"C:\Users\Administrator\Games\Steam\steamapps\common\Skyrim Special Edition");
+        var steamPath = fileSystem.FromUnsanitizedFullPath(@"C:\Program Files (x86)\Steam");
+        var libraryFolder = new GameFinder.StoreHandlers.Steam.Models.LibraryFolder
+        {
+            Path = fileSystem.FromUnsanitizedFullPath(@"C:\Users\Administrator\Games\Steam"),
+            Label = "",
+            TotalDiskSize = NexusMods.Paths.Size.Zero,
+            AppSizes = new Dictionary<AppId, NexusMods.Paths.Size>()
+        };
+
+        var appId = AppId.From(489830);
+
+        var ngame = new SteamGame
+        {
+            AppManifest = new AppManifest
+            {
+                AppId = appId,
+                Name = "Skyrim Special Edition",
+                InstallationDirectory = nexusPath,
+                ManifestPath = fileSystem.FromUnsanitizedFullPath(@"C:\Users\Administrator\Games\Steam\steamapps\appmanifest_489830.acf"), // required!
+                StateFlags = 0 // required!
+            },
+            LibraryFolder = libraryFolder,
+            SteamPath = steamPath,
+        };
+
+        foreach (var key in games.Keys.ToList())
+        {
+            if (key.ToString() == "489830")
+            {
+                games[key] = (TGame)(object)ngame!;
+            }
+        }
 
         foreach (var (id, game) in games)
         {
             try
             {
                 var path = getPath(game);
+                if(id.ToString() == "489830") {
+                    path = (AbsolutePath)"C:\\Users\\Administrator\\Games\\Steam\\steamapps\\common\\Skyrim Special Edition";
+                }
                 if (!path.DirectoryExists())
                 {
                     _logger.LogError("Game does not exist: {Game}", game);
@@ -163,11 +206,12 @@ public class GameLocator : IGameLocator
 
             if (TryFindLocationInner(game, out path))
             {
-                _locationCache.Add(game, path);
+                _locationCache[game] = path;
                 return true;
             }
         }
 
+        path = default;
         return false;
     }
 

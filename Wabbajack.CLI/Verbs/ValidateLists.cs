@@ -58,8 +58,7 @@ public class ValidateLists
     private readonly AsyncLock _imageProcessLock;
 
     private readonly ConcurrentBag<(Uri, Hash)> _proxyableFiles = new();
-
-
+    
     public ValidateLists(ILogger<ValidateLists> logger, Networking.WabbajackClientApi.Client wjClient,
         Client gitHubClient, TemporaryFileManager temporaryFileManager,
         DownloadDispatcher dispatcher, DTOSerializer dtos, ParallelOptions parallelOptions,
@@ -116,6 +115,9 @@ public class ValidateLists
             _logger.LogInformation("Validating {MachineUrl} - {Version}", list.NamespacedName, list.Version);
         }
 
+        ConcurrentDictionary<string, HashSet<string>> modsPerList = new();
+        HashSet<string> allMods = new();
+
         var validatedLists = await listData.PMapAll(async modList =>
         {
             var validatedList = new ValidatedModList
@@ -125,13 +127,6 @@ public class ValidateLists
                 MachineURL = modList.NamespacedName,
                 Version = modList.Version
             };
-
-            if (modList.ForceDown)
-            {
-                _logger.LogWarning("List is ForceDown, skipping");
-                validatedList.Status = ListStatus.ForcedDown;
-                return validatedList;
-            }
 
             using var scope = _logger.BeginScope("MachineURL: {MachineUrl}", modList.NamespacedName);
             _logger.LogInformation("Verifying {MachineUrl} - {Title}", modList.NamespacedName, modList.Title);
@@ -153,9 +148,47 @@ public class ValidateLists
                 validatedList.Status = ListStatus.ForcedDown;
                 return validatedList;
             }
+
+            try
+            {
+                var (smallImage, largeImage) = await ProcessModlistImage(reports, modList, token);
+                validatedList.SmallImage =
+                    new Uri(
+                        $"https://raw.githubusercontent.com/wabbajack-tools/mod-lists/master/reports/{smallImage.ToString().Replace("\\", "/")}");
+                validatedList.LargeImage =
+                    new Uri(
+                        $"https://raw.githubusercontent.com/wabbajack-tools/mod-lists/master/reports/{largeImage.ToString().Replace("\\", "/")}");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "While processing modlist images for {MachineURL}", modList.NamespacedName);
+            }
+
+            try
+            {
+                _logger.LogInformation("Populating search index with contents of {MachineURL}", modList.NamespacedName);
+                HashSet<string> modListSearchableMods = new();
+                foreach (var archive in modListData.Archives)
+                {
+                    if (archive.State is not Nexus n) continue;
+                    if (string.IsNullOrWhiteSpace(n.Name)) continue;
+                    allMods.Add(n.Name);
+                    modListSearchableMods.Add(n.Name);
+                }
+
+                modsPerList.TryAdd(modList.Links.MachineURL, modListSearchableMods);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "While populating search index for {MachineURL}", modList.NamespacedName);
+            }
+
+            if (modList.ForceDown)
+            {
+                _logger.LogWarning("List is forced down");
+                validatedList.Status = ListStatus.ForcedDown;
+            }
             
-
-
             _logger.LogInformation("Verifying {Count} archives from {Name}", modListData.Archives.Length, modList.NamespacedName);
 
             var archives = await modListData.Archives.PMapAll(async archive =>
@@ -209,23 +242,15 @@ public class ValidateLists
                 ? ListStatus.Failed
                 : ListStatus.Available;
 
-            try
-            {
-                var (smallImage, largeImage) = await ProcessModlistImage(reports, modList, token);
-                validatedList.SmallImage =
-                    new Uri(
-                        $"https://raw.githubusercontent.com/wabbajack-tools/mod-lists/master/reports/{smallImage.ToString().Replace("\\", "/")}");
-                validatedList.LargeImage =
-                    new Uri(
-                        $"https://raw.githubusercontent.com/wabbajack-tools/mod-lists/master/reports/{largeImage.ToString().Replace("\\", "/")}");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "While processing modlist images for {MachineURL}", modList.NamespacedName);
-            }
-
             return validatedList;
         }).ToArray();
+        
+        // Save search index to file
+        {
+            await using var searchIndexFileName = reports.Combine("searchIndex.json")
+                .Open(FileMode.Create, FileAccess.Write, FileShare.None);
+            await _dtos.Serialize(new SearchIndex() { AllMods = allMods, ModsPerList = modsPerList.ToDictionary() }, searchIndexFileName, true);
+        }
 
         var allArchives = validatedLists.SelectMany(l => l.Archives).ToList();
         _logger.LogInformation("Validated {Count} lists in {Elapsed}", validatedLists.Length, stopWatch.Elapsed);
@@ -268,7 +293,7 @@ public class ValidateLists
             var height = standardWidth * image.Height / image.Width;
             image.Mutate(x => x
                 .Resize(standardWidth, height));
-            largeImage = validatedList.RepositoryName.ToRelativePath().Combine(hash.ToHex()+"_large").WithExtension(Ext.Webp);
+            largeImage = validatedList.RepositoryName.ToRelativePath().Combine(validatedList.Links.MachineURL + "_large").WithExtension(Ext.Webp);
             await image.SaveAsync(largeImage.RelativeTo(reports).ToString(), new WebpEncoder {Quality = 85}, cancellationToken: token);
         }
 
@@ -280,7 +305,7 @@ public class ValidateLists
             var height = standardWidth * image.Height / image.Width;
             image.Mutate(x => x
                 .Resize(standardWidth, height));
-            smallImage = validatedList.RepositoryName.ToRelativePath().Combine(hash.ToHex()+"_small").WithExtension(Ext.Webp);
+            smallImage = validatedList.RepositoryName.ToRelativePath().Combine(validatedList.Links.MachineURL + "_small").WithExtension(Ext.Webp);
             await image.SaveAsync(smallImage.RelativeTo(reports).ToString(), new WebpEncoder {Quality = 75}, cancellationToken: token);
         }
 
@@ -472,7 +497,10 @@ public class ValidateLists
 
             try
             {
-                var oldSummary = await _wjClient.GetDetailedStatus(validatedList.MachineURL);
+                var namespacedName = validatedList.MachineURL.Split('/');
+                var machineURL = namespacedName[0];
+                var repository = namespacedName[1];
+                var oldSummary = await _wjClient.GetDetailedStatus(repository, machineURL);
 
                 if (oldSummary.ModListHash != validatedList.ModListHash)
                 {
@@ -607,13 +635,17 @@ public class ValidateLists
                 return (ArchiveStatus.Valid, archive);
             case Nexus:
                 return (ArchiveStatus.Valid, archive);
+            case MediaFire:
+                return (ArchiveStatus.Valid, archive);
             case VectorPlexus:
                 return (ArchiveStatus.InValid, archive);
         }
 
         if (archive.State is Http http && (http.Url.Host.EndsWith("github.com")
                                            //TODO: Find a better solution for the list validation of LoversLab files.
-                                           || http.Url.Host.EndsWith("loverslab.com")))
+                                           || http.Url.Host.EndsWith("loverslab.com")
+                                           //TODO: Find a better solution for the list validation of Mediafire files.
+                                           || http.Url.Host.EndsWith("mediafire.com")))
             return (ArchiveStatus.Valid, archive);
         
         try
@@ -686,4 +718,4 @@ public class ValidateLists
         await archiveManager.Ingest(tempFile.Path, token);
         return hash;
     }
-}
+} 

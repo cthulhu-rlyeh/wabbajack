@@ -185,7 +185,7 @@ public class MO2Compiler : ACompiler
             Readme = Settings.ModListReadme,
             Image = ModListImage != default ? ModListImage.FileName : default,
             Website = Settings.ModListWebsite,
-            Version = Settings.ModlistVersion,
+            Version = Settings.Version,
             IsNSFW = Settings.ModlistIsNSFW
         };
 
@@ -206,9 +206,18 @@ public class MO2Compiler : ACompiler
     {
         NextStep("Finalizing", "Validating Archives", modList.Archives.Length);
         var allowList = await _wjClient.LoadDownloadAllowList();
+        var mirrors = (await _wjClient.LoadMirrors()).ToLookup(a => a.Hash);
         foreach (var archive in modList.Archives)
         {
             UpdateProgress(1);
+            var matchedHashes = mirrors[archive.Hash].ToArray();
+            if (matchedHashes.Any())
+            {
+                _logger.LogInformation("Replacing {name}, {primaryKeyString} with {mirror}", archive.Name,
+                    archive.State.PrimaryKeyString, matchedHashes.First().Name);
+                archive.State = matchedHashes.First().State;
+            }
+            
             if (!_dispatcher.IsAllowed(archive, allowList))
             {
                 _logger.LogCritical("Archive {name}, {primaryKeyString} is not allowed", archive.Name,
@@ -295,6 +304,7 @@ public class MO2Compiler : ACompiler
             new IgnoreFilename(this, ".refcache".ToRelativePath()),
             //Include custom categories / splash screens
             new IncludeRegex(this, @"categories\.dat$"),
+            new IncludeRegex(this, @"nexuscatmap\.dat$"),
             new IncludeRegex(this, @"splash\.png"),
 
             new IncludeAllConfigs(this),
@@ -313,7 +323,14 @@ public class MO2Compiler : ACompiler
         };
 
         if (!_settings.UseTextureRecompression)
+        {
+            _logger.LogInformation("Texture recompression disabled! Removing MatchSimiliarTextures from the compilation stack.");
             steps = steps.Where(s => s is not MatchSimilarTextures).ToList();
+        }
+        else
+        {
+            _logger.LogInformation("Texture recompression enabled!");
+        }
 
         return steps.Where(s => !s.Disabled);
     }

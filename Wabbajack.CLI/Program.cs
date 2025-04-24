@@ -19,6 +19,7 @@ using Wabbajack.Services.OSIntegrated;
 using Wabbajack.VFS;
 using Client = Wabbajack.Networking.GitHub.Client;
 using Wabbajack.CLI.Builder;
+using CG.Web.MegaApiClient;
 
 namespace Wabbajack.CLI;
 
@@ -32,7 +33,7 @@ internal class Program
             {
                 services.AddSingleton(new JsonSerializerOptions());
                 services.AddSingleton<HttpClient, HttpClient>();
-                services.AddSingleton<IHttpDownloader, SingleThreadedDownloader>();
+                services.AddResumableHttpDownloader();
                 services.AddSingleton<IConsole, SystemConsole>();
                 services.AddSingleton<CommandLineBuilder, CommandLineBuilder>();
                 services.AddSingleton<TemporaryFileManager>();
@@ -41,6 +42,9 @@ internal class Program
                 services.AddSingleton<Client>();
                 services.AddSingleton<Networking.WabbajackClientApi.Client>();
                 services.AddSingleton(s => new GitHubClient(new ProductHeaderValue("wabbajack")));
+                services.AddSingleton<TemporaryFileManager>();
+                services.AddSingleton<MegaApiClient>();
+                services.AddSingleton<IUserInterventionHandler, ThrowingUserInterventionHandler>();
 
                 services.AddOSIntegrated();
                 services.AddServerLib();
@@ -50,11 +54,6 @@ internal class Program
                 
                 services.AddSingleton<CommandLineBuilder>();
                 services.AddCLIVerbs();
-
- 
-
-                
-                services.AddSingleton<IUserInterventionHandler, UserInterventionHandler>();
             }).Build();
 
         var service = host.Services.GetService<CommandLineBuilder>();
